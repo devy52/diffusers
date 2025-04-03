@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import importlib
 import os
 import re
@@ -44,7 +45,6 @@ from ..utils import (
 from ..utils.torch_utils import is_compiled_module
 from .transformers_loading_utils import _load_tokenizer_from_dduf, _load_transformers_model_from_dduf
 
-
 if is_transformers_available():
     import transformers
     from transformers import PreTrainedModel, PreTrainedTokenizerBase
@@ -57,7 +57,6 @@ if is_accelerate_available():
     from accelerate import dispatch_model
     from accelerate.hooks import remove_hook_from_module
     from accelerate.utils import compute_module_sizes, get_max_memory
-
 
 INDEX_FILE = "diffusion_pytorch_model.bin"
 CUSTOM_PIPELINE_FILE_NAME = "pipeline.py"
@@ -92,11 +91,12 @@ for library in LOADABLE_CLASSES:
     ALL_IMPORTABLE_CLASSES.update(LOADABLE_CLASSES[library])
 
 
-def is_safetensors_compatible(filenames, passed_components=None, folder_names=None) -> bool:
+def is_safetensors_compatible(filenames, variant=None, passed_components=None, folder_names=None) -> bool:
     """
     Checking for safetensors compatibility:
-    - The model is safetensors compatible only if there is a safetensors file for each model component present in
-      filenames.
+    - By default, all models are saved with the default pytorch serialization, so we use the list of default pytorch
+      files to know which safetensors files are needed.
+    - The model is safetensors compatible only if there is a matching safetensors file for every default pytorch file.
 
     Converting default pytorch serialized filenames to safetensors serialized filenames:
     - For models from the diffusers library, just replace the ".bin" extension with ".safetensors"
@@ -109,8 +109,16 @@ def is_safetensors_compatible(filenames, passed_components=None, folder_names=No
 
     # extract all components of the pipeline and their associated files
     components = {}
+    pt_filenames = []
+    sf_filenames = set()
+
     for filename in filenames:
         if not len(filename.split("/")) == 2:
+            _, extension = os.path.splitext(filename)
+            if extension == ".bin":
+                pt_filenames.append(os.path.normpath(filename))
+            elif extension == ".safetensors":
+                sf_filenames.add(os.path.normpath(filename))
             continue
 
         component, component_filename = filename.split("/")
@@ -136,6 +144,22 @@ def is_safetensors_compatible(filenames, passed_components=None, folder_names=No
             matches.append(match_exists)
 
         if not any(matches):
+            return False
+
+    for filename in pt_filenames:
+        #  filename = 'foo/bar/baz.bam' -> path = 'foo/bar', filename = 'baz', extension = '.bam'
+        path, filename = os.path.split(filename)
+        filename, extension = os.path.splitext(filename)
+
+        if filename.startswith("pytorch_model"):
+            filename = filename.replace("pytorch_model", "model")
+        else:
+            filename = filename
+
+        expected_sf_filename = os.path.normpath(os.path.join(path, filename))
+        expected_sf_filename = f"{expected_sf_filename}.safetensors"
+        if expected_sf_filename not in sf_filenames:
+            logger.warning(f"{expected_sf_filename} not found")
             return False
 
     return True
@@ -230,7 +254,9 @@ def variant_compatible_siblings(filenames, variant=None, ignore_patterns=None) -
         component_non_variants = set()
         if variant is not None:
             component_variants = filter_with_regex(component_filenames, variant_file_re)
-            component_variant_index_files = filter_with_regex(component_filenames, variant_index_re)
+            component_variant_index_files = filter_with_regex(component_filenames, variant 
+   
+index_re)
 
             component_legacy_variants = filter_with_regex(component_filenames, legacy_variant_file_re)
             component_legacy_variant_index_files = filter_with_regex(component_filenames, legacy_variant_index_re)
@@ -262,6 +288,20 @@ def variant_compatible_siblings(filenames, variant=None, ignore_patterns=None) -
             f"expected, please check your folder structure."
         )
 
+    def convert_to_variant(filename):
+        if "index" in filename:
+            variant_filename = filename.replace("index", f"index.{variant}")
+        elif re.compile(f"^(.*?){transformers_index_format}").match(filename) is not None:
+            variant_filename = f"{filename.split('-')[0]}.{variant}-{'-'.join(filename.split('-')[1:])}"
+        else:
+            variant_filename = f"{filename.split('.')[0]}.{variant}.{filename.split('.')[1]}"
+        return variant_filename
+
+    for f in usable_filenames - variant_filenames:
+        variant_filename = convert_to_variant(f)
+        if variant_filename not in usable_filenames:
+            usable_filenames.add(f)
+
     return usable_filenames, variant_filenames
 
 
@@ -278,7 +318,9 @@ def warn_deprecated_model_variant(pretrained_model_name_or_path, token, variant,
 
     if set(model_filenames).issubset(set(comp_model_filenames)):
         warnings.warn(
-            f"You are loading the variant {revision} from {pretrained_model_name_or_path} via `revision='{revision}'` even though you can load it via `variant=`{revision}`. Loading model variants via `revision='{revision}'` is deprecated and will be removed in diffusers v1. Please use `variant='{revision}'` instead.",
+            f"You are loading the variant {revision} from {pretrained_model_name_or_path} via `revision='{revision}'` even though you can load it via `variant=`{revision}`. Loading model variants via `revision='{revision}'` is deprecated and will be removed in diffusers v1. Please use `variant
+
+='{revision}'` instead.",
             FutureWarning,
         )
     else:
@@ -674,14 +716,13 @@ def load_sub_model(
     variant: str,
     low_cpu_mem_usage: bool,
     cached_folder: Union[str, os.PathLike],
-    use_safetensors: bool,
-    dduf_entries: Optional[Dict[str, DDUFEntry]],
-    provider_options: Any,
+    use_safetensors: bool = False,
+    dduf_entries: Optional[Dict[str, DDUFEntry]] = None,
+    provider_options: Any = None,
 ):
     """Helper method to load the module `name` from `library_name` and `class_name`"""
 
     # retrieve class candidates
-
     class_obj, class_candidates = get_class_obj_and_candidates(
         library_name,
         class_name,
