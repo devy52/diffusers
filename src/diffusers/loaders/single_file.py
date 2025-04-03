@@ -19,12 +19,10 @@ import torch
 from huggingface_hub import snapshot_download
 from huggingface_hub.utils import LocalEntryNotFoundError, validate_hf_hub_args
 from packaging import version
-from typing_extensions import Self
 
 from ..utils import deprecate, is_transformers_available, logging
 from .single_file_utils import (
     SingleFileComponentError,
-    _is_legacy_scheduler_kwargs,
     _is_model_weights_in_cached_folder,
     _legacy_load_clip_tokenizer,
     _legacy_load_safety_checker,
@@ -44,6 +42,7 @@ logger = logging.get_logger(__name__)
 # Legacy behaviour. `from_single_file` does not load the safety checker unless explicitly provided
 SINGLE_FILE_OPTIONAL_COMPONENTS = ["safety_checker"]
 
+
 if is_transformers_available():
     import transformers
     from transformers import PreTrainedModel, PreTrainedTokenizer
@@ -61,7 +60,6 @@ def load_single_file_sub_model(
     local_files_only=False,
     torch_dtype=None,
     is_legacy_loading=False,
-    disable_mmap=False,
     **kwargs,
 ):
     if is_pipeline_module:
@@ -108,7 +106,6 @@ def load_single_file_sub_model(
             subfolder=name,
             torch_dtype=torch_dtype,
             local_files_only=local_files_only,
-            disable_mmap=disable_mmap,
             **kwargs,
         )
 
@@ -138,7 +135,7 @@ def load_single_file_sub_model(
             class_obj, checkpoint=checkpoint, config=cached_model_config_path, local_files_only=local_files_only
         )
 
-    elif is_diffusers_scheduler and (is_legacy_loading or _is_legacy_scheduler_kwargs(kwargs)):
+    elif is_diffusers_scheduler and is_legacy_loading:
         loaded_sub_model = _legacy_load_scheduler(
             class_obj, checkpoint=checkpoint, component_name=name, original_config=original_config, **kwargs
         )
@@ -270,7 +267,7 @@ class FromSingleFileMixin:
 
     @classmethod
     @validate_hf_hub_args
-    def from_single_file(cls, pretrained_model_link_or_path, **kwargs) -> Self:
+    def from_single_file(cls, pretrained_model_link_or_path, **kwargs):
         r"""
         Instantiate a [`DiffusionPipeline`] from pretrained pipeline weights saved in the `.ckpt` or `.safetensors`
         format. The pipeline is set in evaluation mode (`model.eval()`) by default.
@@ -311,9 +308,6 @@ class FromSingleFileMixin:
                       hosted on the Hub.
                     - A path to a *directory* (for example `./my_pipeline_directory/`) containing the pipeline
                       component configs in Diffusers format.
-            disable_mmap ('bool', *optional*, defaults to 'False'):
-                Whether to disable mmap when loading a Safetensors model. This option can perform better when the model
-                is on a network mount or hard drive.
             kwargs (remaining dictionary of keyword arguments, *optional*):
                 Can be used to overwrite load and saveable variables (the pipeline components of the specific pipeline
                 class). The overwritten components are passed directly to the pipelines `__init__` method. See example
@@ -335,7 +329,7 @@ class FromSingleFileMixin:
 
         >>> # Enable float16 and move to GPU
         >>> pipeline = StableDiffusionPipeline.from_single_file(
-        ...     "https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5/blob/main/v1-5-pruned-emaonly.ckpt",
+        ...     "https://huggingface.co/runwayml/stable-diffusion-v1-5/blob/main/v1-5-pruned-emaonly.ckpt",
         ...     torch_dtype=torch.float16,
         ... )
         >>> pipeline.to("cuda")
@@ -361,15 +355,8 @@ class FromSingleFileMixin:
         local_files_only = kwargs.pop("local_files_only", False)
         revision = kwargs.pop("revision", None)
         torch_dtype = kwargs.pop("torch_dtype", None)
-        disable_mmap = kwargs.pop("disable_mmap", False)
 
         is_legacy_loading = False
-
-        if torch_dtype is not None and not isinstance(torch_dtype, torch.dtype):
-            torch_dtype = torch.float32
-            logger.warning(
-                f"Passed `torch_dtype` {torch_dtype} is not a `torch.dtype`. Defaulting to `torch.float32`."
-            )
 
         # We shouldn't allow configuring individual models components through a Pipeline creation method
         # These model kwargs should be deprecated
@@ -396,7 +383,6 @@ class FromSingleFileMixin:
             cache_dir=cache_dir,
             local_files_only=local_files_only,
             revision=revision,
-            disable_mmap=disable_mmap,
         )
 
         if config is None:
@@ -518,7 +504,6 @@ class FromSingleFileMixin:
                         original_config=original_config,
                         local_files_only=local_files_only,
                         is_legacy_loading=is_legacy_loading,
-                        disable_mmap=disable_mmap,
                         **kwargs,
                     )
                 except SingleFileComponentError as e:
